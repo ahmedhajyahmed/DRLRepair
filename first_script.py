@@ -16,7 +16,7 @@ envCartPole.seed(50)  # Set the seed to keep the environment consistent across r
 
 # Global Variables
 # EPISODES = 500
-EPISODES = 3
+EPISODES = 150
 TRAIN_END = 0
 
 
@@ -81,8 +81,8 @@ class DeepQNetwork:
         # Store the experience in memory
         self.memory.append((state, action, reward, nstate, done))
 
-    def save(self):
-        self.model.save("dqn.h5")
+    def save(self, file_name):
+        self.model.save(file_name)
 
     def load_dqn(self, file_path):
         self.model = keras.models.load_model(file_path)
@@ -133,12 +133,27 @@ class DeepQNetwork:
             self.epsilon *= self.epsilon_decay
 
     def track_internals(self):
-        self.WEIGHTS.append(self.model.weights)
+        tamp = []
+        for layer in self.model.layers:
+            tamp.append(np.array(layer.weights[0]))
+            tamp.append(np.array(layer.weights[1]))
+        self.WEIGHTS.append(tamp)
 
-    def save_internals(self):
+    def save_internals(self, file_name):
+        a = self.model.layers[0].weights
         observations = np.array(self.OBSERVATIONS)
-        weights = np.array(self.WEIGHTS)
-        np.savez("internals.npz", ob=observations, w=weights)
+        nb_layers = len(self.model.weights)
+        weights = []
+        for n in range(nb_layers):
+            weights.append([])
+        for step in self.WEIGHTS:
+            for n in range(nb_layers):
+                weights[n].append(np.array(step[n]))
+        internals_dict = {'ob': observations}
+        for n in range(nb_layers):
+            internals_dict[str(n)] = np.array(weights[n])
+
+        np.savez(file_name, **internals_dict)
 
 
 def train(env, batch_size):
@@ -262,14 +277,14 @@ def retraining(env, dqn, batch_size, rewards, epsilons, retraining_episodes=150)
 
 
 def main():
-    # print("------------------training---------------------")
+    print("------------------training---------------------")
     rewards, epsilons = [], []
     batch_size = get_batch_size()
-    test_episodes, nS, dqn, rewards, epsilons = train(envCartPole, batch_size)
-    final_rewards, final_epsilons = test(envCartPole, 10, nS, dqn, rewards, epsilons)
-    visualize(envCartPole, final_rewards, final_epsilons)
-    dqn.save()
-    dqn.save_internals()
+    # test_episodes, nS, dqn, rewards, epsilons = train(envCartPole, batch_size)
+    # final_rewards, final_epsilons = test(envCartPole, 10, nS, dqn, rewards, epsilons)
+    # visualize(envCartPole, final_rewards, final_epsilons)
+    # dqn.save("dqn.h5")
+    # dqn.save_internals("internals.npz")
 
     print("------------------environment distortion---------------------")
     nS = envCartPole.observation_space.shape[0]
@@ -277,8 +292,8 @@ def main():
     loaded_dqn = DeepQNetwork(nS, nA, learning_rate(), discount_rate(), 1, 0.001, 0.995, batch_size)
     loaded_dqn.load_dqn("dqn.h5")
     env_changed = gym.make('CartPole-v1').unwrapped
-    env_changed.force_mag = 9  # nominal is +10.0
-    env_changed.masscart = 2
+    env_changed.force_mag = 5  # nominal is +10.0
+    env_changed.masscart = 5
     new_rewards, new_epsilons = test(env_changed, 10, nS, loaded_dqn, rewards, epsilons)
     visualize(env_changed, new_rewards, new_epsilons)
 
@@ -288,6 +303,8 @@ def main():
     visualize(env_changed, retraining_rewards, retraining_epsilons)
     retraining_rewards, retraining_epsilons = test(envCartPole, 10, nS, new_dqn, rewards, epsilons)
     visualize(env_changed, retraining_rewards, retraining_epsilons)
+    new_dqn.save("./experiments/re_dqn_fm_5_m_5.h5")
+    new_dqn.save_internals("./experiments/internals_fm_5_m_5.npz")
 
 
 if __name__ == '__main__':
