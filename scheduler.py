@@ -3,6 +3,7 @@ import gym
 import numpy as np
 import matplotlib.pyplot as plt
 from collections import deque
+import tensorflow as tf
 from tensorflow import keras
 import random
 import os
@@ -20,7 +21,6 @@ envCartPole.seed(50)  # Set the seed to keep the environment consistent across r
 # EPISODES = 500
 EPISODES = 150
 TRAIN_END = 0
-
 
 # Hyper Parameters
 def discount_rate():  # Gamma
@@ -47,11 +47,12 @@ class DeepQNetwork:
         self.epsilon_min = epsilon_min
         self.epsilon_decay = epsilon_decay
         self.model = self.build_model()
-        self.loss = []
         self.batch_size = batch_size
         self.WEIGHTS = []
         self.BIASES = []
         self.OBSERVATIONS = []
+        self.loss_object = tf.keras.losses.MeanSquaredError()
+        self.optimizer = tf.keras.optimizers.Adam(learning_rate=self.alpha)
 
     def build_model(self):
         model = keras.Sequential()  # linear stack of layers https://keras.io/models/sequential/
@@ -64,10 +65,27 @@ class DeepQNetwork:
         model.add(keras.layers.Dense(self.nA, activation='linear'))  # Layer 3 -> [output]
         #   Size has to match the output (different actions)
         #   Linear activation on the last layer
-        model.compile(loss='mean_squared_error',  # Loss function: Mean Squared Error
-                      optimizer=keras.optimizers.Adam(
-                          lr=self.alpha))  # Optimizer: Adam (Feel free to check other options)
         return model
+
+    def compute_loss(self, x, y, weights, training):
+        # training=training is needed only if there are layers with different
+        # behavior during training versus inference (e.g. Dropout).
+        y_ = self.model(x, training=training)
+        a = self.loss_object(y_true=y, y_pred=y_, sample_weight=weights)
+        b = self.loss_object(y_true=y, y_pred=y_)
+        return self.loss_object(y_true=y, y_pred=y_, sample_weight=weights)
+
+    def compute_grad(self, inputs, targets, weights):
+        with tf.GradientTape() as tape:
+            loss_value = self.compute_loss(inputs, targets, weights, training=True)
+        return loss_value, tape.gradient(loss_value, self.model.trainable_variables)
+
+    def customized_fit(self, x, y, weights):
+        # Optimize the model
+        loss_value, grads = self.compute_grad(x, y, weights)
+        self.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
+
+        return loss_value, grads
 
     def action(self, state):
         if np.random.rand() <= self.epsilon:
@@ -124,41 +142,20 @@ class DeepQNetwork:
         x_reshape = np.array(x).reshape(self.batch_size, self.nS)
         y_reshape = np.array(y)
         epoch_count = 1  # Epochs is the number or iterations
-        hist = self.model.fit(x_reshape, y_reshape, epochs=epoch_count, verbose=0)
-        # track weights and biases
-        self.track_internals()
-        # Graph Losses
-        for i in range(epoch_count):
-            self.loss.append(hist.history['loss'][i])
+
+        hist_loss, hist_grad = self.customized_fit(x_reshape, y_reshape, np.ones(shape=x_reshape.shape[0])* 0.5)
+        # print("epoch: {}; loss: {};".format(epoch_count, hist_loss))
+
         # Decay Epsilon
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
 
-    def track_internals(self):
-        tamp = []
-        for layer in self.model.layers:
-            tamp.append(np.array(layer.weights[0]))
-            tamp.append(np.array(layer.weights[1]))
-        self.WEIGHTS.append(tamp)
-
-    def save_internals(self, file_name):
-        a = self.model.layers[0].weights
-        observations = np.array(self.OBSERVATIONS)
-        nb_layers = len(self.model.weights)
-        weights = []
-        for n in range(nb_layers):
-            weights.append([])
-        for step in self.WEIGHTS:
-            for n in range(nb_layers):
-                weights[n].append(np.array(step[n]))
-        internals_dict = {'ob': observations}
-        for n in range(nb_layers):
-            internals_dict[str(n)] = np.array(weights[n])
-
-        np.savez(file_name, **internals_dict)
+        return hist_loss
 
 
 def train(env, batch_size):
+    train_loss_results = []
+    epoch_loss_avg = None
     # Create the agent
     nS = env.observation_space.shape[0]  # This is only 4
     nA = env.action_space.n  # Actions
@@ -169,6 +166,7 @@ def train(env, batch_size):
     epsilons = []  # Store the Explore/Exploit
     test_episodes = 0
     for e in range(EPISODES):
+        epoch_loss_avg = tf.keras.metrics.Mean()
         state = env.reset()
         state = np.reshape(state, [1, nS])  # Resize to store in memory to pass to .predict
         tot_rewards = 0
@@ -189,7 +187,8 @@ def train(env, batch_size):
                 break
             # Experience Replay
             if len(dqn.memory) > batch_size:
-                dqn.experience_replay()
+                loss_value = dqn.experience_replay()
+                epoch_loss_avg.update_state(loss_value)
         # If our current NN passes we are done
         # I am going to use the last 5 runs
         if len(rewards) > 5 and np.average(rewards[-5:]) > 195:
@@ -197,8 +196,9 @@ def train(env, batch_size):
             test_episodes = EPISODES - e
             TRAIN_END = e
             break
+        train_loss_results.append(epoch_loss_avg.result())
 
-    return test_episodes, nS, dqn, rewards, epsilons
+    return test_episodes, nS, dqn, rewards, epsilons, train_loss_results
 
 
 def test(env, test_episodes, nS, dqn, rewards, epsilons):
@@ -226,25 +226,18 @@ def test(env, test_episodes, nS, dqn, rewards, epsilons):
                       .format(e_test, test_episodes, tot_rewards, 0))
                 break
 
-        x_test = np.array(test_set).squeeze()
-        coverage = Coverage(dqn.model, None, None)
-        coverage.calculate_metrics(x_test)
-        pattern_set = coverage.pattern_set
-
-    return rewards, epsilons, pattern_set
+    return rewards, epsilons
 
 
-def visualize(env, rewards, epsilons):
+def visualize(env, rewards, train_loss_results):
     rolling_average = np.convolve(rewards, np.ones(100) / 100)
 
     plt.plot(rewards)
     plt.plot(rolling_average, color='black')
     plt.axhline(y=195, color='r', linestyle='-')  # Solved Line
     # Scale Epsilon (0.001 - 1.0) to match reward (0 - 200) range
-    eps_graph = [200 * x for x in epsilons]
-    plt.plot(eps_graph, color='g', linestyle='-')
-    # Plot the line where TESTING begins
-    plt.axvline(x=TRAIN_END, color='y', linestyle='-')
+
+    plt.plot(train_loss_results, color='g', linestyle='-')
     plt.xlim((0, EPISODES))
     plt.ylim((0, 220))
     plt.show()
@@ -252,76 +245,12 @@ def visualize(env, rewards, epsilons):
     env.close()
 
 
-def retraining(env, dqn, batch_size, rewards, epsilons, retraining_episodes=150):
-    nS = env.observation_space.shape[0]  # This is only 4
-
-    for e in range(retraining_episodes):
-        state = env.reset()
-        state = np.reshape(state, [1, nS])  # Resize to store in memory to pass to .predict
-        tot_rewards = 0
-        for time in range(210):  # 200 is when you "solve" the game. This can continue forever as far as I know
-            action = dqn.action(state)
-            nstate, reward, done, _ = env.step(action)
-            nstate = np.reshape(nstate, [1, nS])
-            tot_rewards += reward
-            dqn.store(state, action, reward, nstate, done)  # Resize to store in memory to pass to .predict
-            state = nstate
-            # done: CartPole fell.
-            # time == 209: CartPole stayed upright
-            if done or time == 209:
-                rewards.append(tot_rewards)
-                epsilons.append(dqn.epsilon)
-                print("episode: {}/{}, score: {}, e: {}"
-                      .format(e, EPISODES, tot_rewards, dqn.epsilon))
-                break
-            # Experience Replay
-            if len(dqn.memory) > batch_size:
-                dqn.experience_replay()
-        # If our current NN passes we are done
-        # I am going to use the last 5 runs
-        if np.average(rewards[-5:]) > 195:
-            break
-
-    return nS, dqn, rewards, epsilons
-
-
 def main():
     print("------------------training---------------------")
-    rewards, epsilons = [], []
     batch_size = get_batch_size()
-    # test_episodes, nS, dqn, rewards, epsilons = train(envCartPole, batch_size)
-    # final_rewards, final_epsilons = test(envCartPole, 10, nS, dqn, rewards, epsilons)
-    # visualize(envCartPole, final_rewards, final_epsilons)
-    # dqn.save("dqn.h5")
-    # dqn.save_internals("internals.npz")
-
-    print("------------------environment distortion---------------------")
-    nS = envCartPole.observation_space.shape[0]
-    nA = envCartPole.action_space.n
-    loaded_dqn = DeepQNetwork(nS, nA, learning_rate(), discount_rate(), 1, 0.001, 0.995, batch_size)
-    loaded_dqn.load_dqn("dqn.h5")
-    rewards, epsilons, set_on_training = test(envCartPole, 2, nS, loaded_dqn, rewards, epsilons)
-    env_changed = gym.make('CartPole-v1').unwrapped
-    env_changed.force_mag = 5    # nominal is +10.0
-    env_changed.masscart = 1
-    new_rewards, new_epsilons, set_after_shift = test(env_changed, 2, nS, loaded_dqn, rewards, epsilons)
-    # visualize(env_changed, new_rewards, new_epsilons)
-
-    print("------------------retraining---------------------")
-    nS, new_dqn, rewards, epsilons = retraining(env_changed, loaded_dqn, batch_size, rewards, epsilons)
-    retraining_rewards, retraining_epsilons, set_retrained_tested_on_changed_env = test(env_changed, 2, nS, new_dqn,
-                                                                                        rewards, epsilons)
-    # visualize(env_changed, retraining_rewards, retraining_epsilons)
-    retraining_rewards, retraining_epsilons, set_retrained_tested_on_org_env = test(envCartPole, 2, nS, new_dqn,
-                                                                                    rewards, epsilons)
-    # visualize(env_changed, retraining_rewards, retraining_epsilons)
-    new_dqn.save("./experiments/re_dqn_fm_500_m_500.h5")
-    # new_dqn.save_internals("./experiments/internals_fm_5_m_5.npz")
-    print("set_on_training vs set_after_shift :",
-          len(set_on_training.intersection(set_after_shift)) / len(set_on_training.union(set_after_shift)))
-    print("set_on_training vs set_after _shift :",
-          len(set_on_training.intersection(set_retrained_tested_on_changed_env)) /
-          len(set_on_training.union(set_retrained_tested_on_changed_env)))
+    test_episodes, nS, dqn, rewards, epsilons, losses = train(envCartPole, batch_size)
+    final_rewards, final_epsilons = test(envCartPole, 10, nS, dqn, rewards, epsilons)
+    visualize(envCartPole, final_rewards, losses)
 
 
 if __name__ == '__main__':
