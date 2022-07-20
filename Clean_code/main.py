@@ -1,3 +1,5 @@
+from random import random
+
 from Clean_code.DQN import DeepQNetwork
 import gym
 import matplotlib.pyplot as plt
@@ -31,13 +33,26 @@ def create_agent(env, batch_size):
 
 def save_model(dqn, path, internals_path=None):
     dqn.save(path)
-    dqn.save_internals(internals_path)
+    if internals_path is not None:
+        dqn.save_internals(internals_path)
 
 
-def drift_env():
+def random_drift_cartpole_env(force_mag_ranges=(0.0, 30.0), mass_cart_ranges=(1.0, 50.0), mass_pole_ranges=(0.1, 50.0),
+                              length_ranges=(0.5, 10.0)):
     env_changed = gym.make('CartPole-v1').unwrapped
-    env_changed.force_mag = 5  # nominal is +10.0
-    env_changed.masscart = 1
+    env_changed.force_mag = random.uniform(force_mag_ranges[0], force_mag_ranges[1])  # default is +10.0
+    env_changed.masscart = random.uniform(mass_cart_ranges[0], mass_cart_ranges[1])  # default is 1
+    env_changed.masspole = random.uniform(mass_pole_ranges[0], mass_pole_ranges[1])  # default is 0.1
+    env_changed.length = random.uniform(length_ranges[0], length_ranges[1])  # default is 0.5
+    return env_changed
+
+
+def drift_cartpole_env(force_mag=10, mass_cart=1, mass_pole=0.1, length=0.5):
+    env_changed = gym.make('CartPole-v1').unwrapped
+    env_changed.force_mag = force_mag  # default is +10.0
+    env_changed.masscart = mass_cart  # default is 1
+    env_changed.masspole = mass_pole  # default is 0.1
+    env_changed.length = length  # default is 0.5
     return env_changed
 
 
@@ -82,40 +97,48 @@ def drift_env():
 #           len(set_on_training.union(set_retrained_tested_on_changed_env)))
 
 def main(batch_size=24):
+    env = drift_cartpole_env()
+
     for i in range(5):
         envCartPole = gym.make('CartPole-v1')
         agent = create_agent(envCartPole, batch_size)
-        rl_runner = RL_runner(agent=agent, env=envCartPole, EPISODES=5)
+        rl_trainer = RL_runner(agent=agent, env=envCartPole, EPISODES=5)
 
         print("------------------training---------------------")
-        test_episodes = rl_runner.train(envCartPole, batch_size)
-        final_rewards, final_epsilons = rl_runner.test(test_episodes=test_episodes, rewards=rl_runner.rewards,
-                                                       epsilons=rl_runner.epsilons)
-        visualize(envCartPole, final_rewards, final_epsilons, rl_runner.EPISODES, rl_runner.TRAIN_END)
-        save_model(dqn=rl_runner.dqn, path="dqn" + str(i) + ".h5", internals_path="internals" + str(i) + ".npz")
+        test_episodes = rl_trainer.train(envCartPole, batch_size)
+        final_rewards, final_epsilons = rl_trainer.test(test_episodes=test_episodes, rewards=rl_trainer.rewards,
+                                                        epsilons=rl_trainer.epsilons)
+        visualize(envCartPole, final_rewards, final_epsilons, rl_trainer.EPISODES, rl_trainer.TRAIN_END)
+        save_model(dqn=rl_trainer.dqn, path="dqn_run_" + str(i) + ".h5")
 
         for j in range(5):
             print("------------------Retraining---------------------")
             envCartPole = gym.make('CartPole-v1')
-            rl_runner = RL_runner(agent=agent, env=envCartPole, EPISODES=3)
-            rl_runner.dqn.load_dqn("dqn" + str(i) + ".h5")
-            final_rewards, final_epsilons = rl_runner.test(test_episodes=2, rewards=rl_runner.rewards,
-                                                           epsilons=rl_runner.epsilons)
-            visualize(envCartPole, final_rewards, final_epsilons, rl_runner.EPISODES, rl_runner.TRAIN_END)
-            env = drift_env()
-            rl_runner.env = env
-            final_rewards, final_epsilons = rl_runner.test(test_episodes=2, rewards=rl_runner.rewards,
-                                                           epsilons=rl_runner.epsilons)
-            visualize(env, final_rewards, final_epsilons, rl_runner.EPISODES, rl_runner.TRAIN_END)
+            agent = create_agent(envCartPole, batch_size)
+            rl_retrainer = RL_runner(agent=agent, env=envCartPole, EPISODES=3)
+            rl_retrainer.dqn.load_dqn("dqn_run_" + str(i) + ".h5")
 
-            rl_runner.retrain(batch_size)
-            final_rewards, final_epsilons = rl_runner.test(test_episodes=2, rewards=rl_runner.rewards,
-                                                           epsilons=rl_runner.epsilons)
-            visualize(env, final_rewards, final_epsilons, rl_runner.EPISODES, rl_runner.TRAIN_END)
-            final_rewards, final_epsilons = rl_runner.test(test_episodes=2, rewards=rl_runner.rewards,
-                                                           epsilons=rl_runner.epsilons)
+            # final_rewards, final_epsilons = rl_trainer.test(test_episodes=2, rewards=rl_runner.rewards,
+            #                                                epsilons=rl_runner.epsilons)
+            # visualize(envCartPole, final_rewards, final_epsilons, rl_runner.EPISODES, rl_runner.TRAIN_END)
+
+            env = drift_cartpole_env()
+            rl_retrainer.env = env
+
+            # final_rewards, final_epsilons = rl_runner.test(test_episodes=2, rewards=rl_runner.rewards,
+            #                                                epsilons=rl_runner.epsilons)
+            # visualize(env, final_rewards, final_epsilons, rl_runner.EPISODES, rl_runner.TRAIN_END)
+
+            rl_retrainer.retrain(batch_size)
+
+            # final_rewards, final_epsilons = rl_runner.test(test_episodes=2, rewards=rl_runner.rewards,
+            #                                                epsilons=rl_runner.epsilons)
+            # visualize(env, final_rewards, final_epsilons, rl_runner.EPISODES, rl_runner.TRAIN_END)
+
+            final_rewards, final_epsilons = rl_retrainer.test(test_episodes=2, rewards=rl_retrainer.rewards,
+                                                              epsilons=rl_retrainer.epsilons)
             # visualize(env_changed, retraining_rewards, retraining_epsilons)
-            save_model(dqn=rl_runner.dqn, path="./experiments/re_dqn_" + str(i) + "_" + str(j) + ".h5")
+            save_model(dqn=rl_retrainer.dqn, path="./experiments/re_dqn_" + str(i) + "_" + str(j) + ".h5")
             # new_dqn.save_internals("./experiments/internals_fm_5_m_5.npz")
 
 
